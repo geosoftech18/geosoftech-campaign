@@ -1,0 +1,127 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+model Lead {
+  id          String     @id @default(auto()) @map("_id") @db.ObjectId
+  businessName String
+  email       String
+  telephone   String?
+  websiteURL  String?
+  linkedin    String?
+  address     String?
+  category    String?
+  city        String?
+  state       String?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  emailLogs   EmailLog[]
+  
+  @@unique([email])
+  @@index([city])
+  @@index([state])
+  @@index([category])
+  @@map("leads")
+}
+
+model Campaign {
+  id              String      @id @default(auto()) @map("_id") @db.ObjectId
+  name            String
+  subject         String
+  body            String
+  segmentCity     String?
+  segmentState    String?
+  segmentCategory String?
+  followUp1Days   Int?        @default(3)
+  followUp2Days   Int?        @default(7)
+  followUp3Days   Int?        @default(10)
+  followUp4Days   Int?        @default(14)
+  reEngagementDays Int?       @default(30)
+  followUp1Subject String?
+  followUp1Body   String?
+  followUp2Subject String?
+  followUp2Body   String?
+  followUp3Subject String?
+  followUp3Body   String?
+  followUp4Subject String?
+  followUp4Body   String?
+  reEngagementSubject String?
+  reEngagementBody   String?
+  status          String      @default("draft") // draft, sending, completed, paused
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  emailLogs       EmailLog[]
+  followUps       FollowUp[]
+  
+  @@index([status])
+  @@map("campaigns")
+}
+
+model EmailLog {
+  id          String     @id @default(auto()) @map("_id") @db.ObjectId
+  leadId     String     @db.ObjectId
+  campaignId String     @db.ObjectId
+  lead       Lead       @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  campaign   Campaign   @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  status     String     @default("pending") // pending, sent, failed, opened, clicked
+  sentAt     DateTime?
+  openedAt   DateTime?
+  clickedAt  DateTime?
+  errorMessage String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  
+  @@index([leadId])
+  @@index([campaignId])
+  @@index([status])
+  @@index([sentAt])
+  @@map("email_logs")
+}
+
+model FollowUp {
+  id          String     @id @default(auto()) @map("_id") @db.ObjectId
+  campaignId String     @db.ObjectId
+  campaign   Campaign   @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  leadId     String     @db.ObjectId
+  emailLogId String     @db.ObjectId
+  type       String     // followup1, followup2
+  scheduledFor DateTime
+  status     String     @default("pending") // pending, sent, failed
+  sentAt     DateTime?
+  errorMessage String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  
+  @@index([campaignId])
+  @@index([status])
+  @@index([scheduledFor])
+  @@map("follow_ups")
+}
+
+model SMTPSettings {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  host          String
+  port          Int
+  secure        Boolean  @default(false)
+  smtpUser      String
+  smtpPassword  String
+  fromEmail     String
+  fromName      String?
+  provider      String?  @default("smtp") // smtp, gmail-smtp, gmail-api
+  clientId      String?  // For Gmail API OAuth2
+  clientSecret  String?  // For Gmail API OAuth2
+  refreshToken  String?  // For Gmail API OAuth2
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  @@map("smtp_settings")
+}
+
