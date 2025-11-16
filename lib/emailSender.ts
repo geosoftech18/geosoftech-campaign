@@ -30,7 +30,17 @@ export function createTransporter(config: SMTPConfig) {
         user: config.user,
         pass: config.password, // App Password for Gmail
       },
-    })
+      // Use IPv4 only to avoid IPv6 resolution warnings
+      connectionTimeout: 10000,
+      socketTimeout: 10000,
+      dns: {
+        lookup: (hostname: string, options: any, callback: any) => {
+          // Force IPv4 lookup to avoid "Failed to resolve IPv6" warnings
+          const dns = require('dns')
+          dns.lookup(hostname, { family: 4 }, callback)
+        },
+      },
+    } as any)
   }
 
   // Regular SMTP
@@ -42,21 +52,45 @@ export function createTransporter(config: SMTPConfig) {
       user: config.user,
       pass: config.password,
     },
-  })
+    // Use IPv4 only to avoid IPv6 resolution warnings
+    connectionTimeout: 10000,
+    socketTimeout: 10000,
+    dns: {
+      lookup: (hostname: string, options: any, callback: any) => {
+        // Force IPv4 lookup to avoid "Failed to resolve IPv6" warnings
+        const dns = require('dns')
+        dns.lookup(hostname, { family: 4 }, callback)
+      },
+    },
+  } as any)
 }
 
 /**
  * Replaces template variables in email content
+ * Supports: {{BusinessName}}, {{City}}, {{State}}, {{Category}}
  */
 export function replaceTemplateVariables(
   content: string,
   variables: Record<string, string | undefined>
 ): string {
+  if (!content) return content
+  
   let result = content
   Object.entries(variables).forEach(([key, value]) => {
-    const regex = new RegExp(`\\{\\{${key}\\}\\}`, 'g')
-    result = result.replace(regex, value || '')
+    // Match {{VariableName}} with case-insensitive matching
+    // Also handle variations like {{BusinessName}}, {{businessName}}, etc.
+    const regex = new RegExp(`\\{\\{${key}\\}\\}`, 'gi')
+    const replacement = value || ''
+    result = result.replace(regex, replacement)
   })
+  
+  // Also handle common typos and variations
+  if (variables.BusinessName) {
+    result = result.replace(/\{\{BussinessName\}\}/gi, variables.BusinessName)
+    result = result.replace(/\{\{businessName\}\}/gi, variables.BusinessName)
+    result = result.replace(/\{\{Businessname\}\}/gi, variables.BusinessName)
+  }
+  
   return result
 }
 
@@ -112,6 +146,14 @@ export function injectTracking(
 }
 
 /**
+ * Validates email address format
+ */
+function isValidEmail(email: string): boolean {
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+  return emailRegex.test(email) && email.length <= 254
+}
+
+/**
  * Sends email to a single lead
  * Supports SMTP, Gmail SMTP, and Gmail API
  */
@@ -133,20 +175,36 @@ export async function sendEmailToLead(
   baseUrl: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
+    // Validate email address before attempting to send
+    if (!isValidEmail(lead.email)) {
+      return {
+        success: false,
+        error: `Invalid email address format: ${lead.email}`,
+      }
+    }
     // Replace template variables
-    const subject = replaceTemplateVariables(campaign.subject, {
-      BusinessName: lead.businessName,
+    // Ensure businessName exists, fallback to empty string if not
+    const businessName = lead.businessName || 'Valued Customer'
+    
+    const subject = replaceTemplateVariables(campaign.subject || '', {
+      BusinessName: businessName,
       City: lead.city || '',
       State: lead.state || '',
       Category: lead.category || '',
     })
 
-    let body = replaceTemplateVariables(campaign.body, {
-      BusinessName: lead.businessName,
+    let body = replaceTemplateVariables(campaign.body || '', {
+      BusinessName: businessName,
       City: lead.city || '',
       State: lead.state || '',
       Category: lead.category || '',
     })
+    
+    // Debug logging (remove in production if needed)
+    if (campaign.subject?.includes('{{')) {
+      console.log(`Template replacement - Original: "${campaign.subject}", Replaced: "${subject}"`)
+      console.log(`BusinessName value: "${businessName}"`)
+    }
 
     // Inject tracking
     body = injectTracking(body, lead.id, baseUrl)

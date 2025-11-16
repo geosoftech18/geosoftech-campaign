@@ -3,8 +3,12 @@ import { prisma } from '@/lib/prisma'
 import { getSMTPConfig, sendEmailToLead } from '@/lib/emailSender'
 import { buildSegmentFilter } from '@/lib/segmenter'
 
-const BATCH_SIZE = 100
+const BATCH_SIZE = 20 // Small batches to avoid Gmail rate limits (20 emails per batch)
 const DAILY_EMAIL_LIMIT = 700 // Maximum emails per day
+const EMAIL_DELAY_MS = 3000 // 3 seconds delay between each email (Gmail allows ~20 emails/minute)
+const BATCH_DELAY_MS = 10000 // 10 seconds delay between batches to avoid rate limits
+const MAX_RETRIES = 3 // Maximum retry attempts for failed emails
+const RETRY_DELAY_MS = 5000 // 5 seconds delay before retry
 
 export async function POST(
   request: NextRequest,
@@ -72,7 +76,19 @@ export async function POST(
       where: segmentFilter,
     })
 
-    // Get leads that already received an email today (to ensure unique emails per day)
+    // Get leads that already received an email from THIS campaign (for resuming)
+    const leadsSentFromThisCampaign = await prisma.emailLog.findMany({
+      where: {
+        campaignId: id,
+        status: 'sent',
+      },
+      select: {
+        leadId: true,
+      },
+      distinct: ['leadId'],
+    })
+
+    // Also get leads that received an email today (to respect daily limit)
     const leadsSentToday = await prisma.emailLog.findMany({
       where: {
         status: 'sent',
@@ -87,10 +103,20 @@ export async function POST(
       distinct: ['leadId'],
     })
 
-    const sentLeadIds = new Set(leadsSentToday.map((log) => log.leadId))
+    // Combine both sets - skip leads that already got this campaign OR already got email today
+    const sentLeadIds = new Set([
+      ...leadsSentFromThisCampaign.map((log) => log.leadId),
+      ...leadsSentToday.map((log) => log.leadId),
+    ])
 
-    // Filter out leads that already received an email today
+    // Filter out leads that already received an email from this campaign or today
     const availableLeads = allMatchingLeads.filter((lead) => !sentLeadIds.has(lead.id))
+    
+    console.log(`\n📊 Lead Filtering:`)
+    console.log(`   Total matching leads: ${allMatchingLeads.length}`)
+    console.log(`   Already sent from this campaign: ${leadsSentFromThisCampaign.length}`)
+    console.log(`   Already sent today (any campaign): ${leadsSentToday.length}`)
+    console.log(`   Available to send: ${availableLeads.length}`)
 
     // Limit to remaining quota
     const leads = availableLeads.slice(0, remainingQuota)
@@ -115,27 +141,143 @@ export async function POST(
     })
 
     // Get base URL for tracking
-    const baseUrl = process.env.NEXTAUTH_URL || 'http://localhost:3000'
+    // Priority: Production URL first, then request origin, then localhost
+    let baseUrl = 'http://localhost:3000'
+    
+    // Check for production URLs first (even when running locally, we want production URLs in emails)
+    if (process.env.NEXTAUTH_URL && !process.env.NEXTAUTH_URL.includes('localhost')) {
+      baseUrl = process.env.NEXTAUTH_URL
+    } else if (process.env.VERCEL_URL) {
+      baseUrl = `https://${process.env.VERCEL_URL}`
+    } else if (process.env.NEXT_PUBLIC_APP_URL && !process.env.NEXT_PUBLIC_APP_URL.includes('localhost')) {
+      baseUrl = process.env.NEXT_PUBLIC_APP_URL
+    } else if (request.nextUrl.origin && !request.nextUrl.origin.includes('localhost')) {
+      // Only use request origin if it's not localhost
+      baseUrl = request.nextUrl.origin
+    } else {
+      // Fallback: try to detect production URL from environment
+      // If running locally but want production URLs, set NEXTAUTH_URL in .env
+      baseUrl = process.env.NEXTAUTH_URL || 'http://localhost:3000'
+    }
+    
+    console.log('Using baseUrl for tracking:', baseUrl)
+    console.log('Request origin was:', request.nextUrl.origin)
+    console.log('NEXTAUTH_URL:', process.env.NEXTAUTH_URL)
+    console.log('VERCEL_URL:', process.env.VERCEL_URL)
 
     // Process in batches
     let sent = 0
     let failed = 0
+    const totalLeads = leads.length
+    const startTime = Date.now()
+
+    console.log(`\n🚀 Starting campaign send: ${totalLeads} emails to send`)
+    console.log(`📊 Batch size: ${BATCH_SIZE}, Email delay: ${EMAIL_DELAY_MS}ms, Batch delay: ${BATCH_DELAY_MS}ms\n`)
 
     for (let i = 0; i < leads.length; i += BATCH_SIZE) {
+      // Check if campaign was paused (with retry for connection issues)
+      let currentCampaign = null
+      let retries = 3
+      while (retries > 0) {
+        try {
+          currentCampaign = await prisma.campaign.findUnique({
+            where: { id },
+            select: { status: true },
+          })
+          break
+        } catch (error: any) {
+          retries--
+          if (retries === 0) {
+            console.error('Failed to check campaign status after retries:', error)
+            throw error
+          }
+          console.warn(`Database connection error, retrying... (${retries} retries left)`)
+          await new Promise((resolve) => setTimeout(resolve, 1000))
+        }
+      }
+      
+      if (currentCampaign?.status === 'paused') {
+        console.log(`\n⏸️  Campaign paused. Stopping at ${sent} sent, ${failed} failed.`)
+        break
+      }
+      
       const batch = leads.slice(i, i + BATCH_SIZE)
+      const batchNumber = Math.floor(i / BATCH_SIZE) + 1
+      const totalBatches = Math.ceil(totalLeads / BATCH_SIZE)
 
-      await Promise.all(
-        batch.map(async (lead) => {
-            // Create email log entry
-            const emailLog = await prisma.emailLog.create({
+      console.log(`\n📦 Processing Batch ${batchNumber}/${totalBatches} (${batch.length} emails)...`)
+
+      // Process emails sequentially within batch to avoid rate limits
+      for (let j = 0; j < batch.length; j++) {
+        const lead = batch[j]
+        const currentIndex = i + j + 1
+        const progress = ((currentIndex / totalLeads) * 100).toFixed(1)
+
+        // Create email log entry (with retry for connection issues)
+        let emailLog = null
+        let createRetries = 3
+        while (createRetries > 0 && !emailLog) {
+          try {
+            emailLog = await prisma.emailLog.create({
               data: {
                 leadId: lead.id,
                 campaignId: id,
                 status: 'pending',
               },
             })
+            break
+          } catch (error: any) {
+            createRetries--
+            if (createRetries === 0) {
+              console.error(`Failed to create email log for ${lead.email} after retries:`, error)
+              failed++
+              continue // Skip this email
+            }
+            console.warn(`Database error creating log, retrying... (${createRetries} retries left)`)
+            await new Promise((resolve) => setTimeout(resolve, 1000))
+          }
+        }
+        
+        if (!emailLog) {
+          continue // Skip this email if we couldn't create the log
+        }
 
+        let retryCount = 0
+        let emailSent = false
+
+        // Check if campaign was paused before processing each email (with retry)
+        let checkCampaign = null
+        let statusRetries = 3
+        while (statusRetries > 0) {
           try {
+            checkCampaign = await prisma.campaign.findUnique({
+              where: { id },
+              select: { status: true },
+            })
+            break
+          } catch (error: any) {
+            statusRetries--
+            if (statusRetries === 0) {
+              console.warn('Failed to check campaign status, continuing...')
+              break
+            }
+            await new Promise((resolve) => setTimeout(resolve, 500))
+          }
+        }
+        
+        if (checkCampaign?.status === 'paused') {
+          console.log(`\n⏸️  Campaign paused. Stopping at ${sent} sent, ${failed} failed.`)
+          break
+        }
+
+        // Retry logic for transient failures
+        while (retryCount <= MAX_RETRIES && !emailSent) {
+          try {
+            // Add delay between emails to avoid Gmail rate limits
+            if (currentIndex > 1) {
+              await new Promise((resolve) => setTimeout(resolve, EMAIL_DELAY_MS))
+            }
+
             // Send email
             const result = await sendEmailToLead(
               smtpConfig,
@@ -145,72 +287,183 @@ export async function POST(
             )
 
             if (result.success) {
-              await prisma.emailLog.update({
-                where: { id: emailLog.id },
-                data: {
-                  status: 'sent',
-                  sentAt: new Date(),
-                },
-              })
-
-              // Schedule follow-ups if configured
-              if (campaign.followUp1Days && campaign.followUp1Subject && campaign.followUp1Body) {
-                await prisma.followUp.create({
-                  data: {
-                    campaignId: id,
-                    leadId: lead.id,
-                    emailLogId: emailLog.id,
-                    type: 'followup1',
-                    scheduledFor: new Date(
-                      Date.now() + campaign.followUp1Days * 24 * 60 * 60 * 1000
-                    ),
-                  },
-                })
+              // Update email log with retry
+              let updateSuccess = false
+              let updateRetries = 3
+              while (updateRetries > 0 && !updateSuccess) {
+                try {
+                  await prisma.emailLog.update({
+                    where: { id: emailLog.id },
+                    data: {
+                      status: 'sent',
+                      sentAt: new Date(),
+                    },
+                  })
+                  updateSuccess = true
+                } catch (error: any) {
+                  updateRetries--
+                  if (updateRetries === 0) {
+                    console.error(`Failed to update email log after retries:`, error)
+                    // Continue anyway - email was sent successfully
+                  } else {
+                    await new Promise((resolve) => setTimeout(resolve, 500))
+                  }
+                }
               }
-
-              if (campaign.followUp2Days && campaign.followUp2Subject && campaign.followUp2Body) {
-                await prisma.followUp.create({
-                  data: {
-                    campaignId: id,
-                    leadId: lead.id,
-                    emailLogId: emailLog.id,
-                    type: 'followup2',
-                    scheduledFor: new Date(
-                      Date.now() + campaign.followUp2Days * 24 * 60 * 60 * 1000
-                    ),
-                  },
-                })
-              }
-
+              
               sent++
+              emailSent = true
+              
+              // Show progress
+              const elapsed = Math.round((Date.now() - startTime) / 1000)
+              const rate = sent / (elapsed / 60) // emails per minute
+              console.log(`✅ [${currentIndex}/${totalLeads}] (${progress}%) Sent to ${lead.email} | Total: ${sent} sent, ${failed} failed | Rate: ${rate.toFixed(1)}/min`)
+
+              // Schedule follow-ups if configured (with error handling)
+              try {
+                if (campaign.followUp1Days && campaign.followUp1Subject && campaign.followUp1Body) {
+                  await prisma.followUp.create({
+                    data: {
+                      campaignId: id,
+                      leadId: lead.id,
+                      emailLogId: emailLog.id,
+                      type: 'followup1',
+                      scheduledFor: new Date(
+                        Date.now() + campaign.followUp1Days * 24 * 60 * 60 * 1000
+                      ),
+                    },
+                  }).catch((err) => {
+                    console.warn(`Failed to create followup1 for ${lead.email}:`, err.message)
+                  })
+                }
+
+                if (campaign.followUp2Days && campaign.followUp2Subject && campaign.followUp2Body) {
+                  await prisma.followUp.create({
+                    data: {
+                      campaignId: id,
+                      leadId: lead.id,
+                      emailLogId: emailLog.id,
+                      type: 'followup2',
+                      scheduledFor: new Date(
+                        Date.now() + campaign.followUp2Days * 24 * 60 * 60 * 1000
+                      ),
+                    },
+                  }).catch((err) => {
+                    console.warn(`Failed to create followup2 for ${lead.email}:`, err.message)
+                  })
+                }
+              } catch (error: any) {
+                // Non-critical error - email was sent, follow-up scheduling can fail
+                console.warn(`Failed to schedule follow-ups for ${lead.email}:`, error.message)
+              }
             } else {
-              await prisma.emailLog.update({
-                where: { id: emailLog.id },
-                data: {
-                  status: 'failed',
-                  errorMessage: result.error || 'Unknown error',
-                },
-              })
-              failed++
+              // Check if error is retryable (rate limit, temporary connection issues)
+              const errorMsg = result.error || 'Unknown error'
+              const isRetryable = 
+                errorMsg.includes('rate limit') ||
+                errorMsg.includes('timeout') ||
+                errorMsg.includes('connection') ||
+                errorMsg.includes('temporary') ||
+                errorMsg.includes('ECONNRESET') ||
+                errorMsg.includes('ETIMEDOUT')
+
+              if (isRetryable && retryCount < MAX_RETRIES) {
+                retryCount++
+                console.log(`⚠️  [${currentIndex}/${totalLeads}] Retry ${retryCount}/${MAX_RETRIES} for ${lead.email}: ${errorMsg}`)
+                await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS * retryCount)) // Exponential backoff
+                continue // Retry
+              } else {
+                // Permanent failure or max retries reached
+                console.error(`❌ [${currentIndex}/${totalLeads}] Failed: ${lead.email} - ${errorMsg}`)
+                // Update email log with retry
+                let updateSuccess = false
+                let updateRetries = 3
+                while (updateRetries > 0 && !updateSuccess) {
+                  try {
+                    await prisma.emailLog.update({
+                      where: { id: emailLog.id },
+                      data: {
+                        status: 'failed',
+                        errorMessage: errorMsg,
+                      },
+                    })
+                    updateSuccess = true
+                  } catch (error: any) {
+                    updateRetries--
+                    if (updateRetries === 0) {
+                      console.warn(`Failed to update failed status after retries:`, error.message)
+                    } else {
+                      await new Promise((resolve) => setTimeout(resolve, 500))
+                    }
+                  }
+                }
+                failed++
+                emailSent = true // Stop retrying
+              }
             }
           } catch (error: any) {
-            await prisma.emailLog.update({
-              where: { id: emailLog.id },
-              data: {
-                status: 'failed',
-                errorMessage: error.message || 'Unknown error',
-              },
-            })
-            failed++
-          }
-        })
-      )
+            const errorMsg = error.message || 'Unknown error'
+            const isRetryable = 
+              errorMsg.includes('timeout') ||
+              errorMsg.includes('connection') ||
+              errorMsg.includes('ECONNRESET') ||
+              errorMsg.includes('ETIMEDOUT')
 
-      // Small delay between batches to protect domain health
+            if (isRetryable && retryCount < MAX_RETRIES) {
+              retryCount++
+              console.log(`⚠️  [${currentIndex}/${totalLeads}] Exception retry ${retryCount}/${MAX_RETRIES} for ${lead.email}: ${errorMsg}`)
+              await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS * retryCount))
+              continue // Retry
+            } else {
+              console.error(`❌ [${currentIndex}/${totalLeads}] Exception failed: ${lead.email} - ${errorMsg}`)
+              // Update email log with retry
+              let updateSuccess = false
+              let updateRetries = 3
+              while (updateRetries > 0 && !updateSuccess) {
+                try {
+                  await prisma.emailLog.update({
+                    where: { id: emailLog.id },
+                    data: {
+                      status: 'failed',
+                      errorMessage: errorMsg,
+                    },
+                  })
+                  updateSuccess = true
+                } catch (updateError: any) {
+                  updateRetries--
+                  if (updateRetries === 0) {
+                    console.warn(`Failed to update exception status after retries:`, updateError.message)
+                  } else {
+                    await new Promise((resolve) => setTimeout(resolve, 500))
+                  }
+                }
+              }
+              failed++
+              emailSent = true // Stop retrying
+            }
+          }
+        }
+      }
+
+      // Delay between batches to avoid Gmail rate limits
       if (i + BATCH_SIZE < leads.length) {
-        await new Promise((resolve) => setTimeout(resolve, 2000))
+        const remainingBatches = totalBatches - batchNumber
+        const estimatedTimeRemaining = Math.round((remainingBatches * (BATCH_SIZE * EMAIL_DELAY_MS + BATCH_DELAY_MS)) / 1000 / 60)
+        console.log(`\n⏸️  Batch ${batchNumber} completed: ${sent} sent, ${failed} failed`)
+        console.log(`   Waiting ${BATCH_DELAY_MS / 1000}s before next batch... (${remainingBatches} batches remaining, ~${estimatedTimeRemaining} min)`)
+        await new Promise((resolve) => setTimeout(resolve, BATCH_DELAY_MS))
       }
     }
+
+    const totalTime = Math.round((Date.now() - startTime) / 1000 / 60)
+    console.log(`\n${'='.repeat(80)}`)
+    console.log(`✅ Campaign sending completed!`)
+    console.log(`   Total sent: ${sent}`)
+    console.log(`   Total failed: ${failed}`)
+    console.log(`   Success rate: ${((sent / totalLeads) * 100).toFixed(2)}%`)
+    console.log(`   Total time: ${totalTime} minutes`)
+    console.log(`   Average rate: ${(sent / (totalTime || 1)).toFixed(1)} emails/minute`)
+    console.log(`${'='.repeat(80)}\n`)
 
     // Update campaign status
     const finalStatus = sent > 0 ? 'completed' : 'draft'
@@ -241,10 +494,16 @@ export async function POST(
     console.error('Error sending campaign:', error)
 
     // Update campaign status on error
-    await prisma.campaign.update({
-      where: { id },
-      data: { status: 'draft' },
-    }).catch(() => {})
+    try {
+      const { id } = await params
+      await prisma.campaign.update({
+        where: { id },
+        data: { status: 'draft' },
+      })
+    } catch (updateError) {
+      // Ignore update errors if campaign doesn't exist
+      console.error('Failed to update campaign status:', updateError)
+    }
 
     return NextResponse.json(
       { error: error.message || 'Failed to send campaign' },

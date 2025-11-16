@@ -28,6 +28,9 @@ export async function GET(request: NextRequest) {
           clickedAt: new Date(),
         },
       })
+      console.log(`Email click tracked: leadId=${leadId}, emailLogId=${emailLog.id}, url=${url}`)
+    } else {
+      console.warn(`No email log found for click tracking: leadId=${leadId}, url=${url}`)
     }
 
     // Redirect to the actual URL

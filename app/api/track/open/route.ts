@@ -28,6 +28,9 @@ export async function GET(request: NextRequest) {
           openedAt: new Date(),
         },
       })
+      console.log(`Email opened tracked: leadId=${leadId}, emailLogId=${emailLog.id}`)
+    } else {
+      console.warn(`No email log found for open tracking: leadId=${leadId}`)
     }
 
     // Return a 1x1 transparent pixel

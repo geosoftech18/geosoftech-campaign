@@ -5,35 +5,35 @@ import { Mail, CheckCircle, XCircle, MousePointerClick, Eye } from 'lucide-react
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 
 export default async function AnalyticsPage() {
-
-  const [
-    totalSent,
-    totalOpened,
-    totalClicked,
-    totalFailed,
-    emailLogs,
-    campaignStats,
-  ] = await Promise.all([
-    prisma.emailLog.count({ where: { status: 'sent' } }),
-    prisma.emailLog.count({ where: { status: 'opened' } }),
-    prisma.emailLog.count({ where: { status: 'clicked' } }),
-    prisma.emailLog.count({ where: { status: 'failed' } }),
-    prisma.emailLog.findMany({
-      where: { sentAt: { not: null } },
-      select: { sentAt: true, status: true },
-      orderBy: { sentAt: 'desc' },
-      take: 100,
-    }),
-    prisma.campaign.findMany({
-      include: {
-        _count: {
-          select: {
-            emailLogs: true,
+  try {
+    const [
+      totalSent,
+      totalOpened,
+      totalClicked,
+      totalFailed,
+      emailLogs,
+      campaignStats,
+    ] = await Promise.all([
+      prisma.emailLog.count({ where: { status: 'sent' } }),
+      prisma.emailLog.count({ where: { status: 'opened' } }),
+      prisma.emailLog.count({ where: { status: 'clicked' } }),
+      prisma.emailLog.count({ where: { status: 'failed' } }),
+      prisma.emailLog.findMany({
+        where: { sentAt: { not: null } },
+        select: { sentAt: true, status: true },
+        orderBy: { sentAt: 'desc' },
+        take: 100,
+      }),
+      prisma.campaign.findMany({
+        include: {
+          _count: {
+            select: {
+              emailLogs: true,
+            },
           },
         },
-      },
-    }),
-  ])
+      }),
+    ])
 
   // Calculate rates
   const openRate = totalSent > 0 ? ((totalOpened / totalSent) * 100).toFixed(2) : '0.00'
@@ -164,5 +164,24 @@ export default async function AnalyticsPage() {
       </Card>
     </div>
   )
+  } catch (error: any) {
+    console.error('Error loading analytics:', error)
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-3xl font-bold mb-2">Analytics</h1>
+          <p className="text-gray-600">Track your email campaign performance</p>
+        </div>
+        <Card>
+          <CardContent className="py-8">
+            <div className="text-center text-red-600">
+              <p className="text-lg font-semibold">Error loading analytics data</p>
+              <p className="text-sm text-gray-600 mt-2">{error?.message || 'Unknown error'}</p>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
 }
 
