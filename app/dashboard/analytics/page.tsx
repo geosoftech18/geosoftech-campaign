@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/prisma'
 import { StatsCard } from '@/components/StatsCard'
 import { Chart } from '@/components/Chart'
+import { CampaignDailyStats } from '@/components/CampaignDailyStats'
 import { Mail, CheckCircle, XCircle, MousePointerClick, Eye } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 
@@ -13,6 +14,7 @@ export default async function AnalyticsPage() {
       totalFailed,
       emailLogs,
       campaignStats,
+      detailedEmailLogs,
     ] = await Promise.all([
       prisma.emailLog.count({ where: { status: 'sent' } }),
       prisma.emailLog.count({ where: { status: 'opened' } }),
@@ -32,6 +34,20 @@ export default async function AnalyticsPage() {
             },
           },
         },
+      }),
+      prisma.emailLog.findMany({
+        where: { sentAt: { not: null } },
+        select: {
+          sentAt: true,
+          status: true,
+          campaignId: true,
+          campaign: {
+            select: {
+              name: true,
+            },
+          },
+        },
+        orderBy: { sentAt: 'desc' },
       }),
     ])
 
@@ -63,6 +79,49 @@ export default async function AnalyticsPage() {
     name: campaign.name.length > 15 ? campaign.name.substring(0, 15) + '...' : campaign.name,
     emails: campaign._count.emailLogs,
   }))
+
+  // Prepare daily campaign statistics data
+  const dailyCampaignStats = detailedEmailLogs.reduce((acc: any[], log) => {
+    if (!log.sentAt || !log.campaign) return acc
+    
+    const date = new Date(log.sentAt)
+    const dateKey = date.toISOString().split('T')[0] // YYYY-MM-DD format
+    
+    // Find existing entry for this date and campaign
+    let entry = acc.find(
+      (e) => e.date === dateKey && e.campaignId === log.campaignId
+    )
+    
+    if (!entry) {
+      entry = {
+        date: dateKey,
+        campaignId: log.campaignId,
+        campaignName: log.campaign.name,
+        sent: 0,
+        opened: 0,
+        clicked: 0,
+        failed: 0,
+      }
+      acc.push(entry)
+    }
+    
+    // Update counts based on status
+    // Note: opened and clicked emails are also counted as sent
+    if (log.status === 'sent' || log.status === 'opened' || log.status === 'clicked') {
+      entry.sent++
+    }
+    if (log.status === 'opened' || log.status === 'clicked') {
+      entry.opened++
+    }
+    if (log.status === 'clicked') {
+      entry.clicked++
+    }
+    if (log.status === 'failed') {
+      entry.failed++
+    }
+    
+    return acc
+  }, [])
 
   return (
     <div className="space-y-6">
@@ -162,6 +221,9 @@ export default async function AnalyticsPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Daily Campaign Statistics Section */}
+      <CampaignDailyStats data={dailyCampaignStats} />
     </div>
   )
   } catch (error: any) {
