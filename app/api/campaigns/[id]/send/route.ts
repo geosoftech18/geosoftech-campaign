@@ -24,20 +24,30 @@ export async function POST(
       return NextResponse.json({ error: 'Campaign not found' }, { status: 404 })
     }
 
+    // Allow sending if status is 'sending' (already in progress), 'active' (can send daily), or 'draft'
+    // Only block if currently sending
     if (campaign.status === 'sending') {
       return NextResponse.json(
         { error: 'Campaign is already being sent' },
         { status: 400 }
       )
     }
+    
+    // If status is 'completed', change it to 'active' to allow daily sending
+    if (campaign.status === 'completed') {
+      await prisma.campaign.update({
+        where: { id },
+        data: { status: 'active' },
+      })
+    }
 
-    // Check daily email limit
+    // Check daily email limit (campaign emails only, follow-ups don't count)
     const today = new Date()
     today.setHours(0, 0, 0, 0)
     const tomorrow = new Date(today)
     tomorrow.setDate(tomorrow.getDate() + 1)
 
-    // Count emails sent today
+    // Count campaign emails sent today (follow-ups are NOT counted in daily limit)
     const emailsSentToday = await prisma.emailLog.count({
       where: {
         status: 'sent',
@@ -53,7 +63,7 @@ export async function POST(
     if (remainingQuota <= 0) {
       return NextResponse.json(
         {
-          error: `Daily email limit reached. You've sent ${emailsSentToday} emails today. Maximum is ${DAILY_EMAIL_LIMIT} per day. Please try again tomorrow.`,
+          error: `Daily campaign email limit reached. You've sent ${emailsSentToday} campaign emails today. Maximum is ${DAILY_EMAIL_LIMIT} campaign emails per day. Follow-up emails are sent separately and don't count towards this limit. Please try again tomorrow.`,
           emailsSentToday,
           dailyLimit: DAILY_EMAIL_LIMIT,
         },
@@ -64,11 +74,12 @@ export async function POST(
     // Get SMTP config
     const smtpConfig = await getSMTPConfig()
 
-    // Build segment filter
+    // Build segment filter (including group if specified)
     const segmentFilter = buildSegmentFilter(
       campaign.segmentCity,
       campaign.segmentState,
-      campaign.segmentCategory
+      campaign.segmentCategory,
+      campaign.segmentGroupId || null
     )
 
     // Get leads matching segment
@@ -76,7 +87,7 @@ export async function POST(
       where: segmentFilter,
     })
 
-    // Get leads that already received an email from THIS campaign (for resuming)
+    // Get leads that already received an email from THIS campaign (don't send to same leads again)
     const leadsSentFromThisCampaign = await prisma.emailLog.findMany({
       where: {
         campaignId: id,
@@ -88,35 +99,20 @@ export async function POST(
       distinct: ['leadId'],
     })
 
-    // Also get leads that received an email today (to respect daily limit)
-    const leadsSentToday = await prisma.emailLog.findMany({
-      where: {
-        status: 'sent',
-        sentAt: {
-          gte: today,
-          lt: tomorrow,
-        },
-      },
-      select: {
-        leadId: true,
-      },
-      distinct: ['leadId'],
-    })
+    // Only skip leads that already got this specific campaign (allow daily sending to new leads)
+    const sentLeadIds = new Set(
+      leadsSentFromThisCampaign.map((log) => log.leadId)
+    )
 
-    // Combine both sets - skip leads that already got this campaign OR already got email today
-    const sentLeadIds = new Set([
-      ...leadsSentFromThisCampaign.map((log) => log.leadId),
-      ...leadsSentToday.map((log) => log.leadId),
-    ])
-
-    // Filter out leads that already received an email from this campaign or today
+    // Filter out leads that already received an email from this campaign
     const availableLeads = allMatchingLeads.filter((lead) => !sentLeadIds.has(lead.id))
     
     console.log(`\n📊 Lead Filtering:`)
     console.log(`   Total matching leads: ${allMatchingLeads.length}`)
     console.log(`   Already sent from this campaign: ${leadsSentFromThisCampaign.length}`)
-    console.log(`   Already sent today (any campaign): ${leadsSentToday.length}`)
     console.log(`   Available to send: ${availableLeads.length}`)
+    console.log(`   Daily campaign quota: ${emailsSentToday}/${DAILY_EMAIL_LIMIT} used, ${remainingQuota} remaining`)
+    console.log(`   Note: Follow-up emails are sent separately and don't count towards daily limit`)
 
     // Limit to remaining quota
     const leads = availableLeads.slice(0, remainingQuota)
@@ -124,11 +120,14 @@ export async function POST(
     if (leads.length === 0) {
       return NextResponse.json(
         {
-          error: 'No available leads to send to. All matching leads have already received an email today.',
-          emailsSentToday,
-          dailyLimit: DAILY_EMAIL_LIMIT,
+          error: 'No available leads to send to. All matching leads have already received an email from this campaign.',
           matchingLeads: allMatchingLeads.length,
-          alreadySentToday: sentLeadIds.size,
+          alreadySentFromCampaign: sentLeadIds.size,
+          dailyQuota: {
+            used: emailsSentToday,
+            limit: DAILY_EMAIL_LIMIT,
+            remaining: remainingQuota,
+          },
         },
         { status: 400 }
       )
@@ -352,6 +351,38 @@ export async function POST(
                     console.warn(`Failed to create followup2 for ${lead.email}:`, err.message)
                   })
                 }
+
+                if (campaign.followUp3Days && campaign.followUp3Subject && campaign.followUp3Body) {
+                  await prisma.followUp.create({
+                    data: {
+                      campaignId: id,
+                      leadId: lead.id,
+                      emailLogId: emailLog.id,
+                      type: 'followup3',
+                      scheduledFor: new Date(
+                        Date.now() + campaign.followUp3Days * 24 * 60 * 60 * 1000
+                      ),
+                    },
+                  }).catch((err) => {
+                    console.warn(`Failed to create followup3 for ${lead.email}:`, err.message)
+                  })
+                }
+
+                if (campaign.followUp4Days && campaign.followUp4Subject && campaign.followUp4Body) {
+                  await prisma.followUp.create({
+                    data: {
+                      campaignId: id,
+                      leadId: lead.id,
+                      emailLogId: emailLog.id,
+                      type: 'followup4',
+                      scheduledFor: new Date(
+                        Date.now() + campaign.followUp4Days * 24 * 60 * 60 * 1000
+                      ),
+                    },
+                  }).catch((err) => {
+                    console.warn(`Failed to create followup4 for ${lead.email}:`, err.message)
+                  })
+                }
               } catch (error: any) {
                 // Non-critical error - email was sent, follow-up scheduling can fail
                 console.warn(`Failed to schedule follow-ups for ${lead.email}:`, error.message)
@@ -465,14 +496,15 @@ export async function POST(
     console.log(`   Average rate: ${(sent / (totalTime || 1)).toFixed(1)} emails/minute`)
     console.log(`${'='.repeat(80)}\n`)
 
-    // Update campaign status
-    const finalStatus = sent > 0 ? 'completed' : 'draft'
+    // Update campaign status to 'active' to allow daily sending (not 'completed')
+    // Status will remain 'active' so it can be sent daily
+    const finalStatus = sent > 0 ? 'active' : 'draft'
     await prisma.campaign.update({
       where: { id },
       data: { status: finalStatus },
     })
 
-    // Calculate remaining quota for the day
+    // Calculate remaining quota for the day (campaign emails only)
     const finalEmailsSentToday = emailsSentToday + sent
     const remainingQuotaAfter = DAILY_EMAIL_LIMIT - finalEmailsSentToday
 
@@ -482,13 +514,14 @@ export async function POST(
       failed,
       total: leads.length,
       dailyStats: {
-        emailsSentToday: finalEmailsSentToday,
+        campaignEmailsSentToday: finalEmailsSentToday,
         dailyLimit: DAILY_EMAIL_LIMIT,
         remainingQuota: remainingQuotaAfter,
+        note: 'Follow-up emails are sent separately and do not count towards the daily limit',
       },
       note: allMatchingLeads.length > leads.length
-        ? `${allMatchingLeads.length - leads.length} leads were skipped (already received email today or quota limit reached)`
-        : undefined,
+        ? `${allMatchingLeads.length - leads.length} leads were skipped (already received email from this campaign)`
+        : `Campaign is now active and can be sent daily. ${remainingQuotaAfter} campaign emails remaining in today's quota. Follow-ups will be sent separately.`,
     })
   } catch (error: any) {
     console.error('Error sending campaign:', error)

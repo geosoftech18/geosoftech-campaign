@@ -78,19 +78,18 @@
 - **Mailgun**: Use SMTP settings from dashboard
 - **AWS SES**: Use SMTP credentials from AWS console
 
-## Follow-up Email Cron Job
+## Automated Email Cron Jobs
 
 ### Option 1: Vercel Cron (if deploying to Vercel)
 
-Add to `vercel.json`:
-```json
-{
-  "crons": [{
-    "path": "/api/cron/followup",
-    "schedule": "0 * * * *"
-  }]
-}
-```
+The `vercel.json` file is already configured with both cron jobs:
+- **Follow-up emails**: Runs every hour
+- **Daily campaigns**: Runs once per day at 9:00 AM
+
+The cron jobs will automatically:
+- Send follow-up emails that are due
+- Send daily campaign emails (700 per day) for all active campaigns
+- Respect daily limits and avoid duplicate sends
 
 ### Option 2: External Cron Service
 
@@ -98,15 +97,34 @@ Use a service like:
 - [cron-job.org](https://cron-job.org)
 - [EasyCron](https://www.easycron.com)
 
-Set to call: `https://your-domain.com/api/cron/followup` every hour
-Add header: `Authorization: Bearer YOUR_CRON_SECRET`
+**For Follow-up Emails** (every hour):
+- URL: `https://your-domain.com/api/cron/followup`
+- Schedule: `0 * * * *` (every hour at minute 0)
+- Header: `Authorization: Bearer YOUR_CRON_SECRET`
+
+**For Daily Campaigns** (once per day):
+- URL: `https://your-domain.com/api/cron/daily-campaigns`
+- Schedule: `0 9 * * *` (every day at 9:00 AM)
+- Header: `Authorization: Bearer YOUR_CRON_SECRET`
 
 ### Option 3: Server Cron (if self-hosting)
 
 Add to crontab:
 ```bash
+# Follow-up emails - every hour
 0 * * * * curl -H "Authorization: Bearer YOUR_CRON_SECRET" https://your-domain.com/api/cron/followup
+
+# Daily campaigns - every day at 9:00 AM
+0 9 * * * curl -H "Authorization: Bearer YOUR_CRON_SECRET" https://your-domain.com/api/cron/daily-campaigns
 ```
+
+### How Daily Campaigns Work
+
+1. **Active Campaigns**: Only campaigns with status `'active'` are sent automatically
+2. **Daily Limit**: Maximum 700 campaign emails per day (follow-ups don't count)
+3. **No Duplicates**: Each campaign only sends to leads that haven't received that campaign's email
+4. **Automatic**: Runs every day at 9:00 AM automatically
+5. **Status Management**: Campaigns stay `'active'` to allow daily sending
 
 ## CSV Upload Format
 

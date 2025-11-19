@@ -55,8 +55,12 @@ export default async function CampaignsPage() {
                     className={`text-xs px-2 py-1 rounded ${
                       campaign.status === 'completed'
                         ? 'bg-green-100 text-green-800'
+                        : campaign.status === 'active'
+                        ? 'bg-purple-100 text-purple-800'
                         : campaign.status === 'sending'
                         ? 'bg-blue-100 text-blue-800'
+                        : campaign.status === 'paused'
+                        ? 'bg-yellow-100 text-yellow-800'
                         : 'bg-gray-100 text-gray-800'
                     }`}
                   >
@@ -85,9 +89,11 @@ export default async function CampaignsPage() {
                       View
                     </Button>
                   </Link>
-                  {campaign.status === 'draft' && (
+                  {(campaign.status === 'draft' || campaign.status === 'active' || campaign.status === 'completed') && campaign.status !== 'sending' && (
                     <Link href={`/dashboard/campaigns/${campaign.id}/send`} className="flex-1">
-                      <Button className="w-full">Send</Button>
+                      <Button className="w-full">
+                        {campaign.status === 'draft' ? 'Send' : 'Send Again'}
+                      </Button>
                     </Link>
                   )}
                 </div>

@@ -12,6 +12,7 @@ datasource db {
 
 model Lead {
   id          String     @id @default(auto()) @map("_id") @db.ObjectId
+  name        String?    // Contact name (optional)
   businessName String
   email       String
   telephone   String?
@@ -24,12 +25,38 @@ model Lead {
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
   emailLogs   EmailLog[]
+  groups      LeadGroupLead[]
   
   @@unique([email])
   @@index([city])
   @@index([state])
   @@index([category])
   @@map("leads")
+}
+
+model LeadGroup {
+  id          String     @id @default(auto()) @map("_id") @db.ObjectId
+  name        String     @unique
+  description String?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  leads       LeadGroupLead[]
+  
+  @@map("lead_groups")
+}
+
+model LeadGroupLead {
+  id          String     @id @default(auto()) @map("_id") @db.ObjectId
+  leadId      String     @db.ObjectId
+  groupId     String     @db.ObjectId
+  lead        Lead       @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  group       LeadGroup  @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  createdAt   DateTime   @default(now())
+  
+  @@unique([leadId, groupId])
+  @@index([leadId])
+  @@index([groupId])
+  @@map("lead_group_leads")
 }
 
 model Campaign {
@@ -40,6 +67,7 @@ model Campaign {
   segmentCity     String?
   segmentState    String?
   segmentCategory String?
+  segmentGroupId  String?    @db.ObjectId // Target specific group
   followUp1Days   Int?        @default(3)
   followUp2Days   Int?        @default(7)
   followUp3Days   Int?        @default(10)
@@ -55,13 +83,14 @@ model Campaign {
   followUp4Body   String?
   reEngagementSubject String?
   reEngagementBody   String?
-  status          String      @default("draft") // draft, sending, completed, paused
+  status          String      @default("draft") // draft, sending, active, completed, paused
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
   emailLogs       EmailLog[]
   followUps       FollowUp[]
   
   @@index([status])
+  @@index([segmentGroupId])
   @@map("campaigns")
 }
 

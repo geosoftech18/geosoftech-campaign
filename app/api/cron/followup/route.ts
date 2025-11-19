@@ -10,6 +10,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    // Follow-up emails are sent separately and don't count towards daily campaign limit
     // Find all pending follow-ups that are due
     const now = new Date()
     const dueFollowUps = await prisma.followUp.findMany({
@@ -42,6 +43,12 @@ export async function GET(request: NextRequest) {
         } else if (followUp.type === 'followup2') {
           subject = followUp.campaign.followUp2Subject || ''
           body = followUp.campaign.followUp2Body || ''
+        } else if (followUp.type === 'followup3') {
+          subject = followUp.campaign.followUp3Subject || ''
+          body = followUp.campaign.followUp3Body || ''
+        } else if (followUp.type === 'followup4') {
+          subject = followUp.campaign.followUp4Subject || ''
+          body = followUp.campaign.followUp4Body || ''
         }
 
         if (!subject || !body) {

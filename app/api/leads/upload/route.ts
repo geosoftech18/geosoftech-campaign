@@ -7,6 +7,7 @@ export async function POST(request: NextRequest) {
 
     const formData = await request.formData()
     const file = formData.get('file') as File
+    const groupId = formData.get('groupId') as string | null
 
     if (!file) {
       return NextResponse.json({ error: 'No file provided' }, { status: 400 })
@@ -24,12 +25,14 @@ export async function POST(request: NextRequest) {
     // Insert leads (upsert by email to avoid duplicates)
     let imported = 0
     let duplicates = 0
+    const importedLeadIds: string[] = []
 
     for (const lead of leads) {
       try {
-        await prisma.lead.upsert({
+        const result = await prisma.lead.upsert({
           where: { email: lead.email },
           update: {
+            name: lead.name,
             businessName: lead.businessName,
             telephone: lead.telephone,
             websiteURL: lead.websiteURL,
@@ -42,12 +45,40 @@ export async function POST(request: NextRequest) {
           create: lead,
         })
         imported++
+        importedLeadIds.push(result.id)
       } catch (error: any) {
         if (error.code === 'P2002') {
           duplicates++
+          // Get existing lead ID for group assignment
+          const existingLead = await prisma.lead.findUnique({
+            where: { email: lead.email },
+            select: { id: true },
+          })
+          if (existingLead) {
+            importedLeadIds.push(existingLead.id)
+          }
         } else {
           throw error
         }
+      }
+    }
+
+    // Add leads to group if groupId provided
+    if (groupId && importedLeadIds.length > 0) {
+      try {
+        await Promise.allSettled(
+          importedLeadIds.map((leadId) =>
+            (prisma as any).leadGroupLead.create({
+              data: {
+                leadId,
+                groupId,
+              },
+            })
+          )
+        )
+      } catch (error) {
+        // Ignore group assignment errors (duplicates are fine)
+        console.warn('Some leads could not be added to group:', error)
       }
     }
 

@@ -1,16 +1,48 @@
 'use client'
 
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import { Label } from '@/components/ui/label'
 import { Upload, FileText, CheckCircle, XCircle } from 'lucide-react'
 import { parseCSV } from '@/lib/csvParser'
+
+interface Group {
+  id: string
+  name: string
+  _count?: {
+    leads: number
+  }
+}
 
 export function CSVUploader({ onUploadComplete }: { onUploadComplete?: () => void }) {
   const [file, setFile] = useState<File | null>(null)
   const [uploading, setUploading] = useState(false)
   const [result, setResult] = useState<{ success: boolean; message: string } | null>(null)
+  const [groupId, setGroupId] = useState<string>('')
+  const [groups, setGroups] = useState<Group[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    fetchGroups()
+  }, [])
+
+  const fetchGroups = async () => {
+    try {
+      const response = await fetch('/api/groups')
+      const data = await response.json()
+      setGroups(data.groups || [])
+    } catch (error) {
+      console.error('Failed to fetch groups:', error)
+    }
+  }
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -28,6 +60,9 @@ export function CSVUploader({ onUploadComplete }: { onUploadComplete?: () => voi
     try {
       const formData = new FormData()
       formData.append('file', file)
+      if (groupId && groupId.trim()) {
+        formData.append('groupId', groupId)
+      }
 
       const response = await fetch('/api/leads/upload', {
         method: 'POST',
@@ -64,6 +99,25 @@ export function CSVUploader({ onUploadComplete }: { onUploadComplete?: () => voi
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        <div className="space-y-2">
+          <Label htmlFor="group-select">Add to Group (Optional)</Label>
+          <Select 
+            value={groupId || undefined} 
+            onValueChange={(value) => setGroupId(value)}
+          >
+            <SelectTrigger id="group-select">
+              <SelectValue placeholder="Select a group (optional)" />
+            </SelectTrigger>
+            <SelectContent>
+              {groups.map((group) => (
+                <SelectItem key={group.id} value={group.id}>
+                  {group.name} ({group._count?.leads || 0} leads)
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
         <div className="flex items-center gap-4">
           <input
             ref={fileInputRef}

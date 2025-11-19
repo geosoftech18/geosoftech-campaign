@@ -1,6 +1,7 @@
 import Papa from 'papaparse'
 
 export interface LeadCSVRow {
+  Name?: string
   BusinessName?: string
   Email?: string
   Telephone?: string
@@ -13,6 +14,7 @@ export interface LeadCSVRow {
 }
 
 export interface ParsedLead {
+  name?: string
   businessName: string
   email: string
   telephone?: string
@@ -51,6 +53,7 @@ export async function parseCSV(file: File): Promise<{
         results.data.forEach((row, index) => {
           const email = row.Email?.trim()
           const businessName = row.BusinessName?.trim()
+          const name = row.Name?.trim()
 
           // Validate required fields
           if (!email) {
@@ -77,6 +80,7 @@ export async function parseCSV(file: File): Promise<{
           seenEmails.add(email.toLowerCase())
 
           leads.push({
+            name: name || undefined,
             businessName,
             email: email.toLowerCase(),
             telephone: row.Telephone?.trim() || undefined,

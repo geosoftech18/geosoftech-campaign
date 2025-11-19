@@ -41,11 +41,12 @@ export async function GET(
 
     const remainingQuota = DAILY_EMAIL_LIMIT - emailsSentToday
 
-    // Build segment filter
+    // Build segment filter (including group if specified)
     const segmentFilter = buildSegmentFilter(
       campaign.segmentCity,
       campaign.segmentState,
-      campaign.segmentCategory
+      campaign.segmentCategory,
+      campaign.segmentGroupId || null
     )
 
     // Get all leads matching segment
@@ -53,14 +54,11 @@ export async function GET(
       where: segmentFilter,
     })
 
-    // Get leads that already received an email today
-    const leadsSentToday = await prisma.emailLog.findMany({
+    // Get leads that already received an email from THIS campaign (not all campaigns)
+    const leadsSentFromThisCampaign = await prisma.emailLog.findMany({
       where: {
+        campaignId: id,
         status: 'sent',
-        sentAt: {
-          gte: today,
-          lt: tomorrow,
-        },
       },
       select: {
         leadId: true,
@@ -68,9 +66,9 @@ export async function GET(
       distinct: ['leadId'],
     })
 
-    const sentLeadIds = new Set(leadsSentToday.map((log) => log.leadId))
+    const sentLeadIds = new Set(leadsSentFromThisCampaign.map((log) => log.leadId))
 
-    // Filter out leads that already received an email today
+    // Filter out leads that already received an email from this campaign
     const availableLeads = allMatchingLeads.filter((lead) => !sentLeadIds.has(lead.id))
 
     // Calculate how many will actually be sent (limited by quota)
